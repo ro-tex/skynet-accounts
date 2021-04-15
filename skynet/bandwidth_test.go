@@ -1,6 +1,17 @@
 package skynet
 
-import "testing"
+import (
+	"testing"
+)
+
+const (
+	// baseSectorTotalSize is the total amount of storage used by a base sector,
+	// including its redundancy.
+	baseSectorTotalSize = SizeBaseSector * RedundancyBaseSector
+	// chunkTotalSize is the total amount of storage used by a chunk, including
+	// its redundancy.
+	chunkTotalSize = SizeChunk * RedundancyChunk
+)
 
 // TestNumChunks ensures that numChunks works as expected.
 func TestNumChunks(t *testing.T) {
@@ -24,21 +35,24 @@ func TestNumChunks(t *testing.T) {
 	}
 }
 
-// TestStorageUsed ensures that StorageUsed works as expected.
-func TestStorageUsed(t *testing.T) {
+// TestRawStorageUsed ensures that RawStorageUsed works as expected.
+func TestRawStorageUsed(t *testing.T) {
 	tests := []struct {
 		size   int64
 		result int64
 	}{
-		{size: 0, result: SizeBaseSector},
-		{size: 1 * MiB, result: SizeBaseSector},
-		{size: 4 * MiB, result: SizeBaseSector},
-		{size: 5 * MiB, result: SizeBaseSector + SizeChunk},
-		{size: 50 * MiB, result: SizeBaseSector + 2*SizeChunk},
-		{size: 500 * MiB, result: SizeBaseSector + 13*SizeChunk},
+		{size: 0, result: baseSectorTotalSize},
+		{size: 1 * MiB, result: baseSectorTotalSize},
+		{size: 4 * MiB, result: baseSectorTotalSize},
+		// 4MB base sector + 1MB overflow which fits in a single 40MB chunk.
+		{size: 5 * MiB, result: baseSectorTotalSize + chunkTotalSize},
+		// 4MB base sector + 46MB overflow which fit in two 40MB chunks.
+		{size: 50 * MiB, result: baseSectorTotalSize + 2*chunkTotalSize},
+		// 4MB base sector + 496MB overflow which fit in math.Ceil(496 / 40.0) = 13 chunks.
+		{size: 500 * MiB, result: baseSectorTotalSize + 13*chunkTotalSize},
 	}
 	for _, tt := range tests {
-		res := StorageUsed(tt.size)
+		res := RawStorageUsed(tt.size)
 		if res != tt.result {
 			t.Errorf("Expected a %d MiB file to result into %d MiB used for upload storage, got %d MiB.",
 				tt.size/MiB, tt.result/MiB, res/MiB)
@@ -52,12 +66,13 @@ func TestBandwidthUploadCost(t *testing.T) {
 		size   int64
 		result int64
 	}{
-		{size: 0, result: 10 * SizeBaseSector},
-		{size: 1 * MiB, result: 10 * SizeBaseSector},
-		{size: 4 * MiB, result: 10 * SizeBaseSector},
-		{size: 5 * MiB, result: 10*SizeBaseSector + 3*SizeChunk},
-		{size: 50 * MiB, result: 10*SizeBaseSector + 2*3*SizeChunk},
-		{size: 500 * MiB, result: 10*SizeBaseSector + 13*3*SizeChunk},
+		{size: 0, result: RedundancyBaseSector * SizeBaseSector},
+		{size: 1 * MiB, result: RedundancyBaseSector * SizeBaseSector},
+		{size: 4 * MiB, result: RedundancyBaseSector * SizeBaseSector},
+		{size: 5 * MiB, result: RedundancyBaseSector*SizeBaseSector + RedundancyChunk*SizeChunk},
+		{size: 50 * MiB, result: RedundancyBaseSector*SizeBaseSector + 2*RedundancyChunk*SizeChunk},
+		// 4MB base sector + 496MB overflow which fit in math.Ceil(496 / 40.0) = 13 chunks.
+		{size: 500 * MiB, result: RedundancyBaseSector*SizeBaseSector + 13*RedundancyChunk*SizeChunk},
 	}
 	for _, tt := range tests {
 		res := BandwidthUploadCost(tt.size)

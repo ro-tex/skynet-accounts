@@ -116,6 +116,7 @@ func TokenFromContext(ctx context.Context) (sub string, claims jwt.MapClaims, to
 	claims = t.Claims.(jwt.MapClaims)
 	if reflect.ValueOf(claims["sub"]).Kind() != reflect.String {
 		err = errors.New("the token does not contain the sub we expect")
+		return
 	}
 	subEntry, ok := claims["sub"]
 	if !ok {

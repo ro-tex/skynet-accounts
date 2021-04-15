@@ -37,9 +37,6 @@ var (
 	// envLogLevel holds the name of the environment variable which defines the
 	// desired log level.
 	envLogLevel = "SKYNET_ACCOUNTS_LOG_LEVEL"
-	// envPort holds the name of the environment variable for the port on which
-	// this service listens.
-	envPort = "SKYNET_ACCOUNTS_PORT"
 	// envPortal holds the name of the environment variable for the portal to
 	// use to fetch skylinks.
 	envPortal = "PORTAL_URL"
@@ -78,10 +75,6 @@ func main() {
 	// Load the environment variables from the .env file.
 	// Existing variables take precedence and won't be overwritten.
 	_ = godotenv.Load()
-	port, ok := os.LookupEnv(envPort)
-	if !ok {
-		port = "3000"
-	}
 	portal, ok := os.LookupEnv(envPortal)
 	if !ok {
 		portal = defaultPortal
@@ -113,8 +106,8 @@ func main() {
 	if err != nil {
 		log.Fatal(errors.AddContext(err, "failed to build the API"))
 	}
-	logger.Info("Listening on port " + port)
-	logger.Fatal(http.ListenAndServe(":"+port, server.Router()))
+	logger.Info("Listening on port 3000")
+	logger.Fatal(http.ListenAndServe(":3000", server.Router()))
 }
 
 // logLevel returns the desires log level.

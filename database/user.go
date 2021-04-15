@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,8 +19,8 @@ import (
 )
 
 const (
-	// TierMinReserved reserved
-	TierMinReserved = iota
+	// TierAnonymous reserved
+	TierAnonymous = iota
 	// TierFree free
 	TierFree
 	// TierPremium5 5
@@ -30,6 +31,16 @@ const (
 	TierPremium80
 	// TierMaxReserved is a guard value that helps us validate tier values.
 	TierMaxReserved
+
+	// mbpsToBytesPerSecond is a multiplier to get from megabits per second to
+	// bytes per second.
+	mbpsToBytesPerSecond = 1024 * 1024 / 8
+
+	// filesAllowedPerTB defines a limit of number of uploaded files we impose
+	// on users. While we define it per TB, we impose it based on their entire
+	// quota, so an Extreme user will be able to upload up to 400_000 files
+	// before being hit with a speed limit.
+	filesAllowedPerTB = 25_000
 )
 
 var (
@@ -37,6 +48,55 @@ var (
 	True = true
 	// False is a helper for when we need to pass a *bool to MongoDB.
 	False = false
+	// UserLimits defines the speed limits for each tier.
+	// RegistryDelay delay is in ms.
+	UserLimits = map[int]TierLimits{
+		TierAnonymous: {
+			UploadBandwidth:   5 * mbpsToBytesPerSecond,
+			DownloadBandwidth: 20 * mbpsToBytesPerSecond,
+			MaxUploadSize:     1 * skynet.GiB,
+			MaxNumberUploads:  0,
+			RegistryDelay:     250,
+			Storage:           0,
+			AutoPinChance:     1e10, // TODO These numbers are provisional, don't mind them
+		},
+		TierFree: {
+			UploadBandwidth:   10 * mbpsToBytesPerSecond,
+			DownloadBandwidth: 40 * mbpsToBytesPerSecond,
+			MaxUploadSize:     1 * skynet.GiB,
+			MaxNumberUploads:  0.1 * filesAllowedPerTB,
+			RegistryDelay:     125,
+			Storage:           100 * skynet.GiB,
+			AutoPinChance:     1e8,
+		},
+		TierPremium5: {
+			UploadBandwidth:   20 * mbpsToBytesPerSecond,
+			DownloadBandwidth: 80 * mbpsToBytesPerSecond,
+			MaxUploadSize:     1 * skynet.GiB,
+			MaxNumberUploads:  1 * filesAllowedPerTB,
+			RegistryDelay:     0,
+			Storage:           1 * skynet.TiB,
+			AutoPinChance:     1e7,
+		},
+		TierPremium20: {
+			UploadBandwidth:   40 * mbpsToBytesPerSecond,
+			DownloadBandwidth: 160 * mbpsToBytesPerSecond,
+			MaxUploadSize:     1 * skynet.GiB,
+			MaxNumberUploads:  4 * filesAllowedPerTB,
+			RegistryDelay:     0,
+			Storage:           4 * skynet.TiB,
+			AutoPinChance:     1e6,
+		},
+		TierPremium80: {
+			UploadBandwidth:   80 * mbpsToBytesPerSecond,
+			DownloadBandwidth: 320 * mbpsToBytesPerSecond,
+			MaxUploadSize:     1 * skynet.GiB,
+			MaxNumberUploads:  20 * filesAllowedPerTB,
+			RegistryDelay:     0,
+			Storage:           20 * skynet.TiB,
+			AutoPinChance:     1e5,
+		},
+	}
 )
 
 type (
@@ -55,10 +115,11 @@ type (
 		SubscriptionCancelAt          time.Time          `bson:"subscription_cancel_at" json:"subscriptionCancelAt"`
 		SubscriptionCancelAtPeriodEnd bool               `bson:"subscription_cancel_at_period_end" json:"subscriptionCancelAtPeriodEnd"`
 		StripeId                      string             `bson:"stripe_id" json:"stripeCustomerId"`
+		QuotaExceeded                 bool               `bson:"quota_exceeded" json:"quotaExceeded"`
 	}
 	// UserStats contains statistical information about the user.
 	UserStats struct {
-		StorageUsed        int64 `json:"storageUsed"`
+		RawStorageUsed     int64 `json:"rawStorageUsed"`
 		NumRegReads        int64 `json:"numRegReads"`
 		NumRegWrites       int64 `json:"numRegWrites"`
 		NumUploads         int   `json:"numUploads"`
@@ -70,6 +131,17 @@ type (
 		BandwidthRegReads  int64 `json:"bwRegReads"`
 		BandwidthRegWrites int64 `json:"bwRegWrites"`
 	}
+	// TierLimits defines the speed limits imposed on the user based on their
+	// tier.
+	TierLimits struct {
+		UploadBandwidth   int   `json:"upload"`        // bytes per second
+		DownloadBandwidth int   `json:"download"`      // bytes per second
+		MaxUploadSize     int64 `json:"maxUploadSize"` // the max size of a single upload in bytes
+		MaxNumberUploads  int   `json:"-"`
+		RegistryDelay     int   `json:"registry"` // ms delay
+		Storage           int64 `json:"-"`
+		AutoPinChance     int   `json:"-"`
+	}
 )
 
 // UserBySub returns the user with the given sub. If `create` is `true` it will
@@ -77,7 +149,17 @@ type (
 func (db *DB) UserBySub(ctx context.Context, sub string, create bool) (*User, error) {
 	users, err := db.managedUsersByField(ctx, "sub", sub)
 	if create && errors.Contains(err, ErrUserNotFound) {
-		return db.UserCreate(ctx, sub, TierFree)
+		var u *User
+		u, err = db.UserCreate(ctx, sub, TierFree)
+		// If we're successful or hit any error, other than a duplicate key we
+		// want to just return. Hitting a duplicate key error means we ran into
+		// a race condition and we can easily recover from that.
+		if err == nil || !strings.Contains(err.Error(), "E11000 duplicate key error collection") {
+			return u, err
+		}
+		// Recover from the race condition by fetching the existing user from
+		// the DB.
+		users, err = db.managedUsersByField(ctx, "sub", sub)
 	}
 	if err != nil {
 		return nil, err
@@ -222,7 +304,7 @@ func (db *DB) UserSetStripeId(ctx context.Context, u *User, stripeId string) err
 
 // UserSetTier sets the user's tier to the given value.
 func (db *DB) UserSetTier(ctx context.Context, u *User, t int) error {
-	if t <= TierMinReserved || t >= TierMaxReserved {
+	if t <= TierAnonymous || t >= TierMaxReserved {
 		return errors.New("invalid tier value")
 	}
 	filter := bson.M{"_id": u.ID}
@@ -288,14 +370,14 @@ func (db *DB) userStats(ctx context.Context, user User) (*UserStats, error) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		n, size, storage, bw, err := db.userUploadStats(ctx, user.ID, startOfMonth)
+		n, size, rawStorage, bw, err := db.userUploadStats(ctx, user.ID, startOfMonth)
 		if err != nil {
 			regErr("Failed to get user's upload bandwidth used:", err)
 			return
 		}
 		stats.NumUploads = n
 		stats.TotalUploadsSize = size
-		stats.StorageUsed = storage
+		stats.RawStorageUsed = rawStorage
 		stats.BandwidthUploads = bw
 		db.staticLogger.Tracef("User %s upload bandwidth: %v", user.ID.Hex(), bw)
 	}()
@@ -346,7 +428,7 @@ func (db *DB) userStats(ctx context.Context, user User) (*UserStats, error) {
 
 // userUploadStats reports on the user's uploads - count, total size and total
 // bandwidth used. It uses the total size of the uploaded skyfiles as basis.
-func (db *DB) userUploadStats(ctx context.Context, id primitive.ObjectID, monthStart time.Time) (count int, totalSize int64, storageUsed int64, totalBandwidth int64, err error) {
+func (db *DB) userUploadStats(ctx context.Context, id primitive.ObjectID, monthStart time.Time) (count int, totalSize int64, rawStorageUsed int64, totalBandwidth int64, err error) {
 	matchStage := bson.D{{"$match", bson.D{
 		{"user_id", id},
 		{"timestamp", bson.D{{"$gt", monthStart}}},
@@ -372,7 +454,6 @@ func (db *DB) userUploadStats(ctx context.Context, id primitive.ObjectID, monthS
 	projectStage := bson.D{{"$project", bson.D{
 		{"_id", 0},
 		{"user_id", 0},
-		{"skylink", 0},
 		{"skylink_data", 0},
 		{"name", 0},
 		{"skylink_id", 0},
@@ -392,19 +473,32 @@ func (db *DB) userUploadStats(ctx context.Context, id primitive.ObjectID, monthS
 
 	// We need this struct, so we can safely decode both int32 and int64.
 	result := struct {
-		Size int64 `bson:"size"`
+		Size     int64  `bson:"size"`
+		Skylink  string `bson:"skylink"`
+		Unpinned bool   `bson:"unpinned"`
 	}{}
+	processedSkylinks := make(map[string]bool)
 	for c.Next(ctx) {
 		if err = c.Decode(&result); err != nil {
 			err = errors.AddContext(err, "failed to decode DB data")
 			return
 		}
-		count++
-		totalSize += result.Size
-		storageUsed += skynet.StorageUsed(result.Size)
+		// All bandwidth is counted, regardless of unpinned status.
 		totalBandwidth += skynet.BandwidthUploadCost(result.Size)
+		// Count only uploads that are still pinned towards total count.
+		if result.Unpinned {
+			continue
+		}
+		count++
+		// Count only unique uploads towards total size and used storage.
+		if processedSkylinks[result.Skylink] {
+			continue
+		}
+		processedSkylinks[result.Skylink] = true
+		totalSize += result.Size
+		rawStorageUsed += skynet.RawStorageUsed(result.Size)
 	}
-	return count, totalSize, storageUsed, totalBandwidth, nil
+	return count, totalSize, rawStorageUsed, totalBandwidth, nil
 }
 
 // userDownloadStats reports on the user's downloads - count, total size and
@@ -483,7 +577,7 @@ func (db *DB) userRegistryWriteStats(ctx context.Context, userId primitive.Objec
 	if err != nil {
 		return 0, 0, errors.AddContext(err, "failed to fetch registry write bandwidth")
 	}
-	return writes, writes * skynet.PriceBandwidthRegistryWrite, nil
+	return writes, writes * skynet.CostBandwidthRegistryWrite, nil
 }
 
 // userRegistryReadsStats reports the number of registry reads by the user and
@@ -497,7 +591,7 @@ func (db *DB) userRegistryReadStats(ctx context.Context, userId primitive.Object
 	if err != nil {
 		return 0, 0, errors.AddContext(err, "failed to fetch registry read bandwidth")
 	}
-	return reads, reads * skynet.PriceBandwidthRegistryRead, nil
+	return reads, reads * skynet.CostBandwidthRegistryRead, nil
 }
 
 // monthStart returns the start of the user's subscription month.
@@ -512,6 +606,12 @@ func monthStart(subscribedUntil time.Time) time.Time {
 	// the month. If they were never subscribed we use Jan 1st 1970 for
 	// SubscribedUntil.
 	daysDelta := subscribedUntil.Day() - now.Day()
-	d := now.AddDate(0, -1, daysDelta)
+	monthsDelta := 0
+	if daysDelta > 0 {
+		// The end of sub day is after the current date, so the start of month
+		// is in the previous month.
+		monthsDelta = -1
+	}
+	d := now.AddDate(0, monthsDelta, daysDelta)
 	return time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, time.UTC)
 }

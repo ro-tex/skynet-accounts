@@ -2,8 +2,9 @@ package database
 
 import "testing"
 
-// TestValidateSkylink ensures validateSkylink properly returns the skylink hash
-func TestValidateSkylink(t *testing.T) {
+// TestExtractSkylinkHash ensures ExtractSkylinkHash properly returns the
+// skylink hash.
+func TestExtractSkylinkHash(t *testing.T) {
 	tests := []struct {
 		in    string
 		out   string
@@ -27,7 +28,7 @@ func TestValidateSkylink(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		out, err := validateSkylink(tt.in)
+		out, err := ExtractSkylinkHash(tt.in)
 		if tt.valid && err != nil {
 			t.Fatalf("expected %s to be valid, got error %s", tt.in, err)
 		}

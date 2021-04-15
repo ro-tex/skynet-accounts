@@ -21,9 +21,8 @@ const maxAttempts = 3
 // the metadata for a given skylink and then add its size to the used space of
 // a given user.
 type Message struct {
-	UploaderID primitive.ObjectID
-	SkylinkID  primitive.ObjectID
-	Attempts   uint8
+	SkylinkID primitive.ObjectID
+	Attempts  uint8
 }
 
 // MetaFetcher is a background task that listens for messages on its queue and
@@ -73,7 +72,7 @@ func (mf *MetaFetcher) processMessage(ctx context.Context, m Message) {
 	if err != nil {
 		logrus.Tracef("Failed to fetch skylink from DB. Skylink ID: %v, error: %v", m.SkylinkID, err)
 		if m.Attempts >= maxAttempts {
-			mf.logger.Debugf("Message exceeded its maximum number of attempts, dropping: %v", m)
+			mf.logger.Debugf("Message exceeded its maximum number of attempts, dropping: %v. Last error: %v.", m, err)
 			return
 		}
 		m.Attempts++
@@ -106,7 +105,7 @@ func (mf *MetaFetcher) processMessage(ctx context.Context, m Message) {
 		}
 		mf.logger.Tracef("Failed to fetch skyfile. Skylink: %s, status: %v, error: %v", sl.Skylink, statusCode, err)
 		if m.Attempts >= maxAttempts {
-			mf.logger.Debugf("Message exceeded its maximum number of attempts, dropping: %v", m)
+			mf.logger.Debugf("Message exceeded its maximum number of attempts, dropping: %v. Last error: %v.", m, err)
 			return
 		}
 		m.Attempts++

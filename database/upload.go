@@ -17,16 +17,18 @@ type Upload struct {
 	UserID    primitive.ObjectID `bson:"user_id,omitempty" json:"userId"`
 	SkylinkID primitive.ObjectID `bson:"skylink_id,omitempty" json:"skylinkId"`
 	Timestamp time.Time          `bson:"timestamp" json:"timestamp"`
+	Unpinned  bool               `bson:"unpinned" json:"-"`
 }
 
 // UploadResponseDTO is the representation of an upload we send as response to
 // the caller.
 type UploadResponseDTO struct {
-	ID        string    `bson:"_id" json:"id"`
-	Skylink   string    `bson:"skylink" json:"skylink"`
-	Name      string    `bson:"name" json:"name"`
-	Size      int64     `bson:"size" json:"size"`
-	Timestamp time.Time `bson:"timestamp" json:"uploadedOn"`
+	ID         string    `bson:"_id" json:"id"`
+	Skylink    string    `bson:"skylink" json:"skylink"`
+	Name       string    `bson:"name" json:"name"`
+	Size       int64     `bson:"size" json:"size"`
+	RawStorage int64     `bson:"raw_storage" json:"rawStorage"`
+	Timestamp  time.Time `bson:"timestamp" json:"uploadedOn"`
 }
 
 // UploadsResponseDTO defines the final format of our response to the caller.
@@ -80,8 +82,59 @@ func (db *DB) UploadsBySkylink(ctx context.Context, skylink Skylink, offset, pag
 	if err := validateOffsetPageSize(offset, pageSize); err != nil {
 		return nil, 0, err
 	}
-	matchStage := bson.D{{"$match", bson.D{{"skylink_id", skylink.ID}}}}
+	matchStage := bson.D{{"$match", bson.D{
+		{"skylink_id", skylink.ID},
+		{"unpinned", false},
+	}}}
 	return db.uploadsBy(ctx, matchStage, offset, pageSize)
+}
+
+// UnpinUpload unpins a single upload by this user. Returns the number of
+// unpinned uploads.
+func (db *DB) UnpinUpload(ctx context.Context, uploadId string, user User) (int64, error) {
+	if uploadId == "" {
+		return 0, errors.New("invalid skylink")
+	}
+	uid, err := primitive.ObjectIDFromHex(uploadId)
+	if err != nil {
+		return 0, errors.New("invalid upload id")
+	}
+	if user.ID.IsZero() {
+		return 0, errors.New("invalid user")
+	}
+	filter := bson.D{
+		{"_id", uid},
+		{"user_id", user.ID},
+		{"unpinned", false},
+	}
+	update := bson.M{"$set": bson.M{"unpinned": true}}
+	ur, err := db.staticUploads.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return 0, err
+	}
+	return ur.ModifiedCount, nil
+}
+
+// UnpinUploads unpins all uploads of this skylink by this user. Returns
+// the number of unpinned uploads.
+func (db *DB) UnpinUploads(ctx context.Context, skylink Skylink, user User) (int64, error) {
+	if skylink.ID.IsZero() {
+		return 0, errors.New("invalid skylink")
+	}
+	if user.ID.IsZero() {
+		return 0, errors.New("invalid user")
+	}
+	filter := bson.D{
+		{"skylink_id", skylink.ID},
+		{"user_id", user.ID},
+		{"unpinned", false},
+	}
+	update := bson.M{"$set": bson.M{"unpinned": true}}
+	ur, err := db.staticUploads.UpdateMany(ctx, filter, update)
+	if err != nil {
+		return 0, err
+	}
+	return ur.ModifiedCount, nil
 }
 
 // UploadsByUser fetches a page of uploads by this user and the total number of
@@ -93,7 +146,10 @@ func (db *DB) UploadsByUser(ctx context.Context, user User, offset, pageSize int
 	if err := validateOffsetPageSize(offset, pageSize); err != nil {
 		return nil, 0, err
 	}
-	matchStage := bson.D{{"$match", bson.D{{"user_id", user.ID}}}}
+	matchStage := bson.D{{"$match", bson.D{
+		{"user_id", user.ID},
+		{"unpinned", false},
+	}}}
 	return db.uploadsBy(ctx, matchStage, offset, pageSize)
 }
 
@@ -123,7 +179,7 @@ func (db *DB) uploadsBy(ctx context.Context, matchStage bson.D, offset, pageSize
 		return nil, 0, err
 	}
 	for ix := range uploads {
-		uploads[ix].Size = skynet.StorageUsed(uploads[ix].Size)
+		uploads[ix].RawStorage = skynet.RawStorageUsed(uploads[ix].Size)
 	}
 	return uploads, int(cnt), nil
 }

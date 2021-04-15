@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io/ioutil"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -95,6 +97,16 @@ func (api *API) userHandler(w http.ResponseWriter, req *http.Request, _ httprout
 	api.WriteJSON(w, u)
 }
 
+// userLimitsHandler returns the speed limits which apply for this user.
+func (api *API) userLimitsHandler(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
+	u := api.userFromRequest(req)
+	if u == nil || u.QuotaExceeded {
+		api.WriteJSON(w, database.UserLimits[database.TierAnonymous])
+		return
+	}
+	api.WriteJSON(w, database.UserLimits[u.Tier])
+}
+
 // userStatsHandler returns statistics about an existing user.
 func (api *API) userStatsHandler(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
 	sub, _, _, err := jwt.TokenFromContext(req.Context())
@@ -111,12 +123,12 @@ func (api *API) userStatsHandler(w http.ResponseWriter, req *http.Request, _ htt
 		api.WriteError(w, err, http.StatusInternalServerError)
 		return
 	}
-	ud, err := api.staticDB.UserStats(req.Context(), *u)
+	us, err := api.staticDB.UserStats(req.Context(), *u)
 	if err != nil {
 		api.WriteError(w, err, http.StatusInternalServerError)
 		return
 	}
-	api.WriteJSON(w, ud)
+	api.WriteJSON(w, us)
 }
 
 // userPutHandler allows changing some user information.
@@ -228,6 +240,36 @@ func (api *API) userUploadsHandler(w http.ResponseWriter, req *http.Request, _ h
 	api.WriteJSON(w, response)
 }
 
+// userUploadDeleteHandler unpins a single upload by this user.
+func (api *API) userUploadDeleteHandler(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	sub, _, _, err := jwt.TokenFromContext(req.Context())
+	if err != nil {
+		api.WriteError(w, err, http.StatusUnauthorized)
+		return
+	}
+	u, err := api.staticDB.UserBySub(req.Context(), sub, false)
+	if errors.Contains(err, database.ErrUserNotFound) {
+		api.WriteError(w, err, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		api.WriteError(w, err, http.StatusInternalServerError)
+		return
+	}
+	uid := ps.ByName("uploadId")
+	_, err = api.staticDB.UnpinUpload(req.Context(), uid, *u)
+	if err != nil {
+		api.WriteError(w, err, http.StatusInternalServerError)
+		return
+	}
+	// Now that we've returned results to the caller, we can take care of some
+	// administrative details, such as user's quotas check.
+	// Note that this call is not affected by the request's context, so we use
+	// a separate one.
+	go api.threadedCheckUserQuotas(context.Background(), u)
+	api.WriteSuccess(w)
+}
+
 // userDownloadsHandler returns all downloads made by the current user.
 func (api *API) userDownloadsHandler(w http.ResponseWriter, req *http.Request, _ httprouter.Params) {
 	sub, _, _, err := jwt.TokenFromContext(req.Context())
@@ -300,11 +342,15 @@ func (api *API) trackUploadHandler(w http.ResponseWriter, req *http.Request, ps 
 		// Queue the skylink to have its meta data fetched and updated in the DB.
 		go func() {
 			api.staticMF.Queue <- metafetcher.Message{
-				UploaderID: u.ID,
-				SkylinkID:  skylink.ID,
+				SkylinkID: skylink.ID,
 			}
 		}()
 	}
+	// Now that we've returned results to the caller, we can take care of some
+	// administrative details, such as user's quotas check.
+	// Note that this call is not affected by the request's context, so we use
+	// a separate one.
+	go api.threadedCheckUserQuotas(context.Background(), u)
 	api.WriteSuccess(w)
 }
 
@@ -369,6 +415,7 @@ func (api *API) trackDownloadHandler(w http.ResponseWriter, req *http.Request, p
 			}
 		}()
 	}
+	go api.threadedAutoPin(context.Background(), u, skylink)
 	api.WriteSuccess(w)
 }
 
@@ -410,6 +457,76 @@ func (api *API) trackRegistryWriteHandler(w http.ResponseWriter, req *http.Reque
 		return
 	}
 	api.WriteSuccess(w)
+}
+
+// skylinkDeleteHandler unpins all uploads of a skylink uploaded by the user.
+func (api *API) skylinkDeleteHandler(w http.ResponseWriter, req *http.Request, ps httprouter.Params) {
+	sub, _, _, err := jwt.TokenFromContext(req.Context())
+	if err != nil {
+		api.WriteError(w, err, http.StatusUnauthorized)
+		return
+	}
+	u, err := api.staticDB.UserBySub(req.Context(), sub, false)
+	if errors.Contains(err, database.ErrUserNotFound) {
+		api.WriteError(w, err, http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		api.WriteError(w, err, http.StatusInternalServerError)
+		return
+	}
+	sl := ps.ByName("skylink")
+	if !database.ValidSkylinkHash(sl) {
+		api.WriteError(w, errors.New("invalid skylink"), http.StatusBadRequest)
+	}
+	skylink, err := api.staticDB.Skylink(req.Context(), sl)
+	if errors.Contains(err, database.ErrInvalidSkylink) {
+		api.WriteError(w, err, http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		api.WriteError(w, err, http.StatusInternalServerError)
+		return
+	}
+	_, err = api.staticDB.UnpinUploads(req.Context(), *skylink, *u)
+	if err != nil {
+		api.WriteError(w, err, http.StatusInternalServerError)
+		return
+	}
+	// Now that we've returned results to the caller, we can take care of some
+	// administrative details, such as user's quotas check.
+	// Note that this call is not affected by the request's context, so we use
+	// a separate one.
+	go api.threadedCheckUserQuotas(context.Background(), u)
+	api.WriteSuccess(w)
+}
+
+// threadedCheckUserQuotas compares the resources consumed by the user to their
+// quotas and sets the QuotaExceeded flag on their account if they exceed any.
+func (api *API) threadedCheckUserQuotas(ctx context.Context, u *database.User) {
+	us, err := api.staticDB.UserStats(ctx, *u)
+	if err != nil {
+		api.staticLogger.Infof("Failed to fetch user's stats. UID: %s, err: %s", u.ID.Hex(), err.Error())
+		return
+	}
+	q := database.UserLimits[u.Tier]
+	quotaExceeded := us.NumUploads > q.MaxNumberUploads || us.TotalUploadsSize > q.Storage
+	if quotaExceeded != u.QuotaExceeded {
+		u.QuotaExceeded = quotaExceeded
+		err = api.staticDB.UserSave(ctx, u)
+		if err != nil {
+			api.staticLogger.Infof("Failed to save user. User: %+v, err: %s", u, err.Error())
+		}
+	}
+}
+
+// threadedAutoPin probabilistically pins the given skylink.
+func (api *API) threadedAutoPin(ctx context.Context, u *database.User, sl *database.Skylink) {
+	rand.Seed(time.Now().UnixNano())
+	if rand.Intn(database.UserLimits[u.Tier].AutoPinChance) > 0 {
+		return
+	}
+	// TODO ...
 }
 
 // fetchOffset extracts the offset from the params and validates its value.

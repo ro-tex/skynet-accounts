@@ -76,7 +76,7 @@ func TestUserStats(t *testing.T) {
 	expectedDownloadBandwidth := int64(0)
 
 	// Create a small upload.
-	skylinkSmall, err := createTestUpload(ctx, db, u, testUploadSizeSmall)
+	skylinkSmall, _, err := createTestUpload(ctx, db, u, testUploadSizeSmall)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestUserStats(t *testing.T) {
 	}
 
 	// Create a big upload.
-	skylinkBig, err := createTestUpload(ctx, db, u, testUploadSizeBig)
+	skylinkBig, _, err := createTestUpload(ctx, db, u, testUploadSizeBig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestUserStats(t *testing.T) {
 	if err != nil {
 		t.Fatal("Failed to register a registry read.", err)
 	}
-	expectedRegReadBandwidth := int64(skynet.PriceBandwidthRegistryRead)
+	expectedRegReadBandwidth := int64(skynet.CostBandwidthRegistryRead)
 	// Check bandwidth.
 	stats, err = db.UserStats(ctx, *u)
 	if err != nil {
@@ -180,7 +180,7 @@ func TestUserStats(t *testing.T) {
 	if err != nil {
 		t.Fatal("Failed to register a registry read.", err)
 	}
-	expectedRegReadBandwidth += int64(skynet.PriceBandwidthRegistryRead)
+	expectedRegReadBandwidth += int64(skynet.CostBandwidthRegistryRead)
 	// Check bandwidth.
 	stats, err = db.UserStats(ctx, *u)
 	if err != nil {
@@ -200,7 +200,7 @@ func TestUserStats(t *testing.T) {
 	if err != nil {
 		t.Fatal("Failed to register a registry write.", err)
 	}
-	expectedRegWriteBandwidth := int64(skynet.PriceBandwidthRegistryWrite)
+	expectedRegWriteBandwidth := int64(skynet.CostBandwidthRegistryWrite)
 	// Check bandwidth.
 	stats, err = db.UserStats(ctx, *u)
 	if err != nil {
@@ -219,7 +219,7 @@ func TestUserStats(t *testing.T) {
 	if err != nil {
 		t.Fatal("Failed to register a registry write.", err)
 	}
-	expectedRegWriteBandwidth += int64(skynet.PriceBandwidthRegistryWrite)
+	expectedRegWriteBandwidth += int64(skynet.CostBandwidthRegistryWrite)
 	// Check bandwidth.
 	stats, err = db.UserStats(ctx, *u)
 	if err != nil {

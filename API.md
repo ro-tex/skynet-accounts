@@ -21,7 +21,7 @@ The workflow of verification follows a simple pattern:
 
 The tiers communicated by the API are numeric. This is the mapping:
 
-0. Reserved. It's not used by the API.
+0. Anonymous.
 1. Free.
 2. Premium 5.
 3. Premium 20.
@@ -37,10 +37,10 @@ Sets the `skynet-jwt` cookie.
 * GET params: none
 * POST params: none
 * Returns:
-  - 204
-  - 400
-  - 401 (missing JWT)
-  - 500
+    - 204
+    - 400
+    - 401 (missing JWT)
+    - 500
 
 ### POST `/logout`
 
@@ -50,10 +50,10 @@ Removes the `skynet-jwt` cookie.
 * GET params: none
 * POST params: none
 * Returns:
-  - 204
-  - 400
-  - 401 (missing JWT)
-  - 500
+    - 204
+    - 400
+    - 401 (missing JWT)
+    - 500
 
 ## User endpoints
 

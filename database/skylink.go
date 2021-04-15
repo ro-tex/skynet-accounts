@@ -11,7 +11,10 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-var skylinkRE = regexp.MustCompile("^.*([a-zA-Z0-9-_]{46}).*$")
+var (
+	extractSkylinkRE      = regexp.MustCompile("^.*([a-zA-Z0-9-_]{46}).*$")
+	validateSkylinkHashRE = regexp.MustCompile("^([a-zA-Z0-9-_]{46})$")
+)
 
 // Skylink represents a skylink object in the DB.
 type Skylink struct {
@@ -23,7 +26,7 @@ type Skylink struct {
 // Skylink gets the DB object for the given skylink.
 // If it doesn't exist it creates it.
 func (db *DB) Skylink(ctx context.Context, skylink string) (*Skylink, error) {
-	skylinkHash, err := validateSkylink(skylink)
+	skylinkHash, err := ExtractSkylinkHash(skylink)
 	if err != nil {
 		return nil, ErrInvalidSkylink
 	}
@@ -103,12 +106,17 @@ func (db *DB) SkylinkDownloadsUpdate(ctx context.Context, id primitive.ObjectID,
 	return nil
 }
 
-// validateSkylink extracts the skylink hash from the given skylink that might
+// ExtractSkylinkHash extracts the skylink hash from the given skylink that might
 // have protocol, path, etc. within it.
-func validateSkylink(skylink string) (string, error) {
-	m := skylinkRE.FindStringSubmatch(skylink)
+func ExtractSkylinkHash(skylink string) (string, error) {
+	m := extractSkylinkRE.FindStringSubmatch(skylink)
 	if len(m) < 2 {
 		return "", errors.New("no valid skylink found in string " + skylink)
 	}
 	return m[1], nil
+}
+
+// ValidSkylinkHash returns true if the given string is a valid skylink hash.
+func ValidSkylinkHash(skylink string) bool {
+	return validateSkylinkHashRE.Match([]byte(skylink))
 }
